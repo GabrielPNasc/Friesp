@@ -10,7 +10,7 @@ The code is written in MicroPython and organized into independent modules: displ
 
 > **Current state:** the display driver, text scrolling, screen rotation, and color themes already work on real hardware. The animated face and sensor integration are under development.
 
-Read in Portuguese: [README.md](README-PT Br.md)
+Read in Portuguese: [README-PT Br.md](README-PT Br.md)
 
 ---
 
