@@ -1,8 +1,32 @@
-
 from machine import Pin, SPI
 import struct
 import time
-import math
+
+
+# ---------------- Apaga os LEDs da placa ----------------
+def apagar_leds():
+    # LED simples (GPIO13 na Feather ESP32-S3 TFT)
+    try:
+        Pin(13, Pin.OUT, value=0)
+        print("GPIO13 -> LOW")
+    except Exception as e:
+        print("erro GPIO13:", e)
+
+    # NeoPixel RGB: tenta os pinos mais comuns e manda preto
+    try:
+        import neopixel
+    except Exception as e:
+        print("sem modulo neopixel:", e)
+        return
+
+    for pino in (33, 48, 38, 47):
+        try:
+            np = neopixel.NeoPixel(Pin(pino, Pin.OUT), 1)
+            np[0] = (0, 0, 0)
+            np.write()
+            print("NeoPixel GPIO%d -> preto" % pino)
+        except Exception as e:
+            print("erro NeoPixel GPIO%d: %s" % (pino, e))
 
 
 class Tela:
@@ -20,15 +44,8 @@ class Tela:
         Pin(21, Pin.OUT, value=1)
         time.sleep_ms(50)
 
-        self.spi = SPI(
-            1,
-            baudrate=40_000_000,
-            polarity=0,
-            phase=0,
-            sck=Pin(36),
-            mosi=Pin(35),
-            miso=Pin(37)
-        )
+        self.spi = SPI(1, baudrate=40_000_000, polarity=0, phase=0,
+                       sck=Pin(36), mosi=Pin(35), miso=Pin(37))
 
         self.cs = Pin(7, Pin.OUT, value=1)
         self.dc = Pin(39, Pin.OUT, value=0)
@@ -61,113 +78,168 @@ class Tela:
         self.cs(0)
         self.dc(0)
         self.spi.write(bytes([c]))
-
         if dados:
             self.dc(1)
             self.spi.write(dados)
-
         self.cs(1)
 
     def janela(self, x0, y0, x1, y1):
-        self.cmd(
-            0x2A,
-            struct.pack(
-                '>HH',
-                x0 + self.xoff,
-                x1 + self.xoff
-            )
-        )
-
-        self.cmd(
-            0x2B,
-            struct.pack(
-                '>HH',
-                y0 + self.yoff,
-                y1 + self.yoff
-            )
-        )
-
+        self.cmd(0x2A, struct.pack('>HH', x0 + self.xoff, x1 + self.xoff))
+        self.cmd(0x2B, struct.pack('>HH', y0 + self.yoff, y1 + self.yoff))
         self.cmd(0x2C)
 
-    def rect(self, x, y, w, h, cor):
-        if w <= 0 or h <= 0:
-            return
-
-        # Impede desenhos fora da tela
-        x0 = max(0, x)
-        y0 = max(0, y)
-        x1 = min(self.LARGURA, x + w)
-        y1 = min(self.ALTURA, y + h)
-
-        if x0 >= x1 or y0 >= y1:
-            return
-
-        w = x1 - x0
-        h = y1 - y0
-
-        self.janela(x0, y0, x1 - 1, y1 - 1)
-
-        linha = struct.pack('>H', cor) * w
-
+    def bloco(self, x0, y0, x1, y1, dados):
+        self.janela(x0, y0, x1, y1)
         self.cs(0)
         self.dc(1)
-
-        for _ in range(h):
-            self.spi.write(linha)
-
+        self.spi.write(dados)
         self.cs(1)
 
     def fill(self, cor):
-        self.rect(
-            0, 0,
-            self.LARGURA,
-            self.ALTURA,
-            cor
-        )
-
-    def elipse(self, cx, cy, rx, ry, cor):
-        # Desenha uma elipse preenchida,
-        # usando retangulos horizontais.
-        for dy in range(-ry, ry + 1):
-            fator = 1 - (dy * dy) / (ry * ry)
-
-            if fator < 0:
-                continue
-
-            dx = int(rx * math.sqrt(fator))
-
-            self.rect(
-                cx - dx,
-                cy + dy,
-                2 * dx + 1,
-                1,
-                cor
-            )
+        linha = struct.pack('>H', cor) * self.LARGURA
+        self.janela(0, 0, self.LARGURA - 1, self.ALTURA - 1)
+        self.cs(0)
+        self.dc(1)
+        for _ in range(self.ALTURA):
+            self.spi.write(linha)
+        self.cs(1)
 
 
-# Cores RGB565
+# ---------------- Cores RGB565 ----------------
 PRETO = 0x0000
-CIANO = 0x07FF
+HALO = 0x0006      # brilho fraquinho em volta das formas
+AZUL = 0x021F      # borda externa (azul profundo)
+MEDIO = 0x04DF     # transicao
+CIANO = 0x2FFF     # miolo brilhante
+BRANCO = 0xAFFF    # dentes e cicatriz
 
-# Inicializa a tela
+# ---------------- Grade estilo matriz de LED ----------------
+CEL = 3            # 80 * 3 = 240 | 45 * 3 = 135
+COLS = 80
+LINS = 45
+LED_GAP = True     # True = 2px acesos + 1px preto (efeito LED)
+
+# Poligonos em coordenadas da grade (col, lin), tirados da imagem
+OLHO_ESQ = [(3.7, 8.6), (6.7, 10.9), (10.4, 13.0), (15.0, 15.3),
+            (20.6, 17.7), (26.1, 19.8), (31.7, 22.0), (24.3, 22.9),
+            (18.7, 22.1), (13.2, 20.9), (9.5, 18.8), (7.6, 16.1),
+            (6.3, 12.9), (4.9, 10.2)]
+OLHO_DIR = [(COLS - x, y) for x, y in OLHO_ESQ]
+
+CICATRIZ = [(66.6, 1.0), (67.3, 9), (68.6, 14.5), (69.2, 17), (68.2, 21),
+            (67.6, 29), (66.9, 21.5), (65.9, 17), (66.0, 12), (66.3, 7)]
+
+
+def dentro(px, py, poly):
+    ok = False
+    n = len(poly)
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if (yi > py) != (yj > py):
+            if px < (xj - xi) * (py - yi) / (yj - yi) + xi:
+                ok = not ok
+        j = i
+    return ok
+
+
+def montar_mascara():
+    """0=vazio, 1=corpo, 2=dente, 3=cicatriz"""
+    m = [[0] * COLS for _ in range(LINS)]
+
+    for gy in range(LINS):
+        cy = gy + 0.5
+        for gx in range(COLS):
+            cx = gx + 0.5
+
+            if dentro(cx, cy, OLHO_ESQ) or dentro(cx, cy, OLHO_DIR):
+                m[gy][gx] = 1
+
+            # Boca em crescente, pontas finas curvadas para cima
+            u = (cx - 40) / 36.3
+            if abs(u) <= 1:
+                topo = 33.0 - 7.4 * u * u
+                base = 43.6 - 16.0 * u * u
+                if topo <= cy <= base:
+                    esp = base - topo
+                    if cy < topo + 2 or cy > base - 2 or esp < 7:
+                        m[gy][gx] = 1                       # labios
+                    else:
+                        c = esp / 2 - 1
+                        f = abs(gx % 8 - 4)                 # dente de cima
+                        if cy - (topo + 2) < c * (1 - f / 4):
+                            m[gy][gx] = 2
+                        f2 = abs((gx + 4) % 8 - 4)          # dente de baixo
+                        if (base - 2) - cy < c * (1 - f2 / 4):
+                            m[gy][gx] = 2
+
+            if dentro(cx, cy, CICATRIZ):
+                m[gy][gx] = 3
+    return m
+
+
+def dist_vazio(m, gx, gy, raio=3):
+    """Distancia (em celulas) ate a celula vazia mais proxima, ate 'raio'."""
+    for r in range(1, raio):
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                if max(abs(dx), abs(dy)) != r:
+                    continue
+                nx, ny = gx + dx, gy + dy
+                if nx < 0 or ny < 0 or nx >= COLS or ny >= LINS or m[ny][nx] == 0:
+                    return r
+    return raio
+
+
+def tem_corpo_perto(m, gx, gy):
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            nx, ny = gx + dx, gy + dy
+            if 0 <= nx < COLS and 0 <= ny < LINS and m[ny][nx] != 0:
+                return True
+    return False
+
+
+def cor_celula(m, gx, gy):
+    v = m[gy][gx]
+    if v == 0:
+        return HALO if tem_corpo_perto(m, gx, gy) else PRETO
+    if v >= 2:
+        return BRANCO
+    d = dist_vazio(m, gx, gy)
+    if d == 1:
+        return AZUL
+    if d == 2:
+        return MEDIO
+    return CIANO
+
+
+def desenhar(tela):
+    m = montar_mascara()
+    y_ini = (tela.ALTURA - LINS * CEL) // 2
+    preto = struct.pack('>H', PRETO)
+
+    for gy in range(LINS):
+        linha = bytearray()
+        for gx in range(COLS):
+            c = struct.pack('>H', cor_celula(m, gx, gy))
+            if LED_GAP:
+                linha += c * (CEL - 1) + preto
+            else:
+                linha += c * CEL
+
+        if LED_GAP:
+            bloco = bytes(linha) * (CEL - 1) + preto * (COLS * CEL)
+        else:
+            bloco = bytes(linha) * CEL
+
+        y0 = y_ini + gy * CEL
+        tela.bloco(0, y0, COLS * CEL - 1, y0 + CEL - 1, bloco)
+
+
+apagar_leds()
 tela = Tela(1)
-
-# Fundo
 tela.fill(PRETO)
-
-# Olho esquerdo
-tela.elipse(66, 57, 24, 24, CIANO)
-tela.elipse(66, 57, 10, 12, PRETO)
-
-# Olho direito
-tela.elipse(174, 57, 24, 24, CIANO)
-tela.elipse(174, 57, 10, 12, PRETO)
-
-# Sorriso
-for y in range(88, 101):
-    dx = int(math.sqrt((100 - y) * 48))
-
-    tela.rect(120 - dx - 1, y, 3, 3, CIANO)
-    tela.rect(120 + dx - 1, y, 3, 3, CIANO)
-
-print("FriESP iniciado!")
+desenhar(tela)
+print("FriESP pronto!")
