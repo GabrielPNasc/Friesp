@@ -1,53 +1,218 @@
-FriESP — ESP32 Reactive Face 🤖
+# FriESP: ESP32 Reactive Face
 
-An animated electronic face developed with the ESP32-S3 and MicroPython.
+An interactive electronic character with an animated face, built on the ESP32 and MicroPython.
 
-FriESP is an embedded systems project that aims to turn an ESP32-S3 into a small electronic character with animated facial expressions and dynamic reactions to temperature and movement.
+**Platform:** ESP32 | **Language:** MicroPython | **Display:** ST7789 | **Status:** In development
 
-The project combines display graphics, sensor integration, and MicroPython programming to create a simple interactive character.
+---
 
-✨ Features
+## Table of Contents
 
-Animated facial expressions.
+1. [Overview](#overview)
+2. [Features](#features)
+3. [Hardware](#hardware)
+4. [Pin Mapping](#pin-mapping)
+5. [Software and Technologies](#software-and-technologies)
+6. [Getting Started](#getting-started)
+7. [Project Structure](#project-structure)
+8. [Display Notes and Known Issues](#display-notes-and-known-issues)
+9. [Development Status and Roadmap](#development-status-and-roadmap)
+10. [Goals](#goals)
+11. [Author](#author)
+12. [Acknowledgments](#acknowledgments)
 
-Blinking eyes and dynamic facial movements.
+---
 
-Temperature-based expressions, such as feeling hot or cold.
+## Overview
 
-Motion and rotation detection to simulate dizziness.
+**FriESP** is an embedded systems project that turns an ESP32 microcontroller into a small electronic character with animated facial expressions. The character is designed to react to its environment: temperature changes alter its expression (feeling hot or cold), and physical movement or rotation makes it appear dizzy.
 
-Modular code structure for easier maintenance and future improvements.
+The project combines three areas of embedded development:
 
-🛠️ Hardware and Technologies
+- **Graphics rendering** on a small TFT display.
+- **Sensor integration** (temperature and motion).
+- **Interactive behavior** driven by user input and environmental data.
 
-Microcontroller: ESP32-S3
+Development is incremental and validated on physical hardware at every stage.
 
-Programming language: MicroPython
+---
 
-Display: TFT display with ST7789 controller
+## Features
 
-Motion sensor: Accelerometer and gyroscope, subject to hardware verification
+| Feature | Description | Status |
+|---|---|---|
+| Display initialization | Low-level ST7789 driver with configurable orientation and color inversion | Done |
+| Scrolling text banner | Pac-Man style wraparound scrolling with a title and subtitle | Done |
+| Screen rotation | Four orientations (landscape, portrait, and both inverted) switched by a button | Done |
+| Color themes | Four background/foreground pairs switched by a button | Done |
+| Animated face | Eyes, mouth, and basic expressions | In progress |
+| Blinking and facial movement | Dynamic idle animations | Planned |
+| Temperature-based expressions | Hot and cold reactions | Planned |
+| Motion and rotation detection | Dizziness simulation | Planned |
+| Automatic expression changes | Behavior engine combining all inputs | Planned |
 
-Temperature sensor: Temperature and pressure sensor, subject to hardware verification
+---
 
-🚧 Development Status
+## Hardware
 
-The project is currently under development.
+### Current development board
 
-Initial display test completed.
+| Component | Specification |
+|---|---|
+| Board | LilyGO TTGO T-Display |
+| Microcontroller | ESP32 (dual-core Xtensa LX6, Wi-Fi and Bluetooth) |
+| Display | 1.14" IPS TFT, 240 x 135 pixels, ST7789 controller, RGB565 |
+| Buttons | 2 onboard (GPIO 0 and GPIO 35) |
+| Connection | USB-C |
 
-Basic facial design.
+### Optional sensors (external modules)
 
-Facial animations.
+The T-Display does **not** include motion or temperature sensors. To implement the reactive features, external modules connected over I2C are required:
 
-Temperature sensor integration.
+| Function | Suggested module | Interface |
+|---|---|---|
+| Accelerometer and gyroscope | MPU6050 or MPU9250 | I2C |
+| Temperature (and pressure) | BMP280, BME280, or similar | I2C |
 
-Motion and rotation detection.
+> **Note:** The sensor choice is subject to hardware verification. The code is being designed so that the sensor driver can be replaced without changing the rest of the application.
 
-Automatic expression changes.
+### Porting note
 
-🎯 Goals
+The project originally targeted the ESP32-S3. The ESP32-S3 variant of the T-Display (T-Display S3) uses an 8-bit parallel display bus instead of SPI, so display pins and initialization differ. The current code targets the **classic ESP32** T-Display with an SPI display bus.
 
-The main goal is to explore embedded systems, sensor integration, graphical rendering, and interactive behavior on a microcontroller.
+---
 
-This project is being developed incrementally, with physical hardware testing and assistance from AI tools during implementation and debugging.
+## Pin Mapping
+
+### Display (ST7789, SPI)
+
+| Signal | GPIO |
+|---|---|
+| SCK (clock) | 18 |
+| MOSI (data) | 19 |
+| CS (chip select) | 5 |
+| DC (data/command) | 16 |
+| RST (reset) | 23 |
+| BL (backlight) | 4 |
+
+### User input
+
+| Button | GPIO | Function |
+|---|---|---|
+| BOOT | 0 | Change color theme |
+| Right button | 35 | Rotate screen |
+
+> GPIO 35 is input-only and relies on the board's external pull-up. GPIO 0 uses the internal pull-up. **Do not hold the BOOT button while powering on the board**, as this enters firmware flashing mode.
+
+---
+
+## Software and Technologies
+
+- **Language:** MicroPython
+- **Firmware:** MicroPython for ESP32 (`ESP32_GENERIC` build recommended)
+- **Display driver:** custom ST7789 routines using `machine.SoftSPI`
+- **Graphics:** `framebuf` (RGB565 frame buffers)
+- **Development tool:** Thonny IDE
+
+---
+
+## Getting Started
+
+### 1. Flash the firmware
+
+1. Download the **ESP32_GENERIC** build from [micropython.org/download](https://micropython.org/download/ESP32_GENERIC/).
+2. In Thonny, open *Tools > Options > Interpreter* and select **MicroPython (ESP32)**.
+3. Click *Install or update MicroPython* and follow the prompts.
+
+### 2. Upload the project
+
+1. Clone or download this repository.
+2. Open *View > Files* in Thonny.
+3. Copy the project files to the root of the device storage.
+
+### 3. Run automatically on boot
+
+MicroPython executes `main.py` at startup. Make sure the entry point is saved on the device with exactly that name, in the root directory.
+
+To check for startup errors, open the Thonny shell and press **Ctrl+D** to soft-reboot the board.
+
+---
+
+## Project Structure
+
+The codebase is organized in modules for maintainability. The planned layout is:
+
+```
+FriESP/
+├── main.py          # Entry point: main loop and state handling
+├── config.py        # Pin mapping, colors, and tunable parameters
+├── display.py       # ST7789 driver: initialization, windowing, rotation
+├── face.py          # Face rendering: eyes, mouth, expressions, blinking
+├── sensors.py       # Temperature and motion sensor abstraction
+├── behavior.py      # Logic that maps sensor data to expressions
+└── README.md
+```
+
+> The current working prototype (display driver, scrolling banner, rotation and color buttons) is contained in a single script and will be split into these modules as development progresses.
+
+---
+
+## Display Notes and Known Issues
+
+- **Hardware SPI vs. SoftSPI.** During bring-up, the display remained blank (backlight on, no image) when using hardware SPI with the installed firmware build. Switching to `SoftSPI` resolved the issue, so the project uses software SPI. This is slower; rendering is therefore optimized by updating only the regions that change.
+- **Display offset.** The ST7789 RAM is 240 x 320, while the physical panel is 135 x 240. A per-orientation offset is applied to the address window:
+
+  | Orientation | MADCTL | X offset | Y offset |
+  |---|---|---|---|
+  | Landscape | `0x60` | 40 | 53 |
+  | Portrait | `0xC0` | 53 | 40 |
+  | Landscape (inverted) | `0xA0` | 40 | 52 |
+  | Portrait (inverted) | `0x00` | 52 | 40 |
+
+- **Color inversion.** This panel requires the inversion command (`0x21`) for correct colors.
+- **Byte order.** `framebuf` stores RGB565 in little-endian order, while the display expects big-endian; colors are byte-swapped before drawing.
+- **Memory.** Large frame buffers can raise `MemoryError` on the ESP32 without PSRAM. Keep text scales moderate.
+- **Automatic rotation.** The T-Display has no motion sensor, so rotation is currently manual (button). Automatic rotation will be possible once an external accelerometer is integrated.
+
+---
+
+## Development Status and Roadmap
+
+- [x] Initial display test
+- [x] Display driver with orientation and color support
+- [x] Scrolling banner with title and subtitle
+- [x] Button-controlled rotation and color themes
+- [ ] Basic facial design
+- [ ] Facial animations (blinking, idle movement)
+- [ ] Temperature sensor integration
+- [ ] Motion and rotation detection
+- [ ] Automatic expression changes
+- [ ] Code refactoring into modules
+
+---
+
+## Goals
+
+The main goal is to explore:
+
+- Embedded systems programming with MicroPython.
+- Low-level display control and graphical rendering on constrained hardware.
+- Sensor integration over I2C.
+- Interactive, state-driven behavior on a microcontroller.
+
+The project is developed incrementally, validated on physical hardware, with assistance from AI tools during implementation and debugging.
+
+---
+
+## Author
+
+**Gabriel Nascimento**
+Developer, Cybersecurity
+
+---
+
+## Acknowledgments
+
+- [MicroPython](https://micropython.org/) project and community.
+- LilyGO for the TTGO T-Display hardware documentation.
+- AI-assisted development tools used for code generation and debugging support.
