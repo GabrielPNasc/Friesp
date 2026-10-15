@@ -1,13 +1,4 @@
-"""
-FriESP - rosto animado para ESP32-S3 (Feather ESP32-S3 TFT, ST7789 240x135)
-
-- Animacoes aleatorias e engracadas enquanto esta parado
-- Quente (>= TEMP_QUENTE) ou frio (<= TEMP_FRIO): toca a animacao de clima UMA vez
-  e repete so depois de PERIODO_CLIMA_S segundos (nao fica em loop infinito)
-- Sacudiu (acelerometro MPU6050): fica tonto
-- Sem sensor? Veja as opcoes de teste na secao CONFIG
-"""
-from machine import Pin, SPI, I2C
+from machine import Pin, SPI, SoftI2C
 import struct
 import time
 import math
@@ -18,23 +9,30 @@ try:
 except ImportError:
     esp32 = None
 
-# ======================= CONFIG =======================
-TEMP_QUENTE = 30.0        # >= isso: animacao de calor
-TEMP_FRIO = 20.0          # <= isso: animacao de frio
-PERIODO_CLIMA_S = 30      # segundos entre uma animacao de clima e a proxima
-TEMP_OFFSET = 0.0         # corrige a leitura (temperatura do chip costuma ser alta)
-TEMP_FORCADA = None       # TESTE: ex. 35 forca "quente", 10 forca "frio"
+TEMP_QUENTE = 30.0
+TEMP_FRIO = 20.0
+HISTERESE = 2.0
+CLIMA_ESTAVEL_S = 5
+PERIODO_CLIMA_S = 30
+TEMP_OFFSET = 0.0
+TEMP_FORCADA = None
 
-I2C_SDA = 3               # STEMMA QT da Feather ESP32-S3 TFT (confira no scan do REPL)
-I2C_SCL = 4
-BOTAO_SIMULA_SACUDIDA = True   # TESTE: apertar BOOT (GPIO0) = sacudir
-LIMIAR_G = 0.7            # quanto a aceleracao tem que variar para contar como "batida"
-IMPACTOS = 0.0001              # batidas dentro de JANELA_MS = sacudida
+I2C_SDA = 42
+I2C_SCL = 41
+BOTAO_SIMULA_SACUDIDA = True
+LIMIAR_G = 0.7
+LIMIAR_GIRO = 200.0
+IMPACTOS = 1
 JANELA_MS = 1000
-TONTO_MS = 3000           # tempo tonto depois da ultima sacudida
+TONTO_MS = 3000
+PARADO_MS = 2000
+MOV_G = 0.12
+MOV_GIRO = 25.0
+PUPILAS = True
+TINGIR_CLIMA = False
 FPS = 20
 
-# ======================= TELA =======================
+
 class Tela:
     LARGURA = 240
     ALTURA = 135
@@ -42,7 +40,7 @@ class Tela:
 
     def __init__(self, rotacao=1):
         madctl, self.xoff, self.yoff = self.ROT[rotacao]
-        Pin(21, Pin.OUT, value=1)          # alimenta TFT e I2C
+        Pin(21, Pin.OUT, value=1)
         time.sleep_ms(50)
         self.spi = SPI(1, baudrate=40_000_000, polarity=0, phase=0,
                        sck=Pin(36), mosi=Pin(35), miso=Pin(37))
@@ -92,32 +90,29 @@ class Tela:
         self.cs(1)
 
 
-# ======================= GRADE / CORES =======================
 CEL = 3
 COLS = 80
 LINS = 45
 DT = 1.0 / FPS
 
-# indices de cor: 0 preto | 1 borda | 2 medio | 3 miolo | 4 branco/dente
-#                 5 gota/floco | 6 lingua | 7 estrela
-NORMAL = (0x0000, 0x021F, 0x04DF, 0x2FFF, 0xAFFF, 0x5FFF, 0xF810, 0xFFE0)
-QUENTE = (0x0000, 0x9800, 0xF800, 0xFD20, 0xFFE0, 0x5FFF, 0xF810, 0xFFE0)
-FRIO   = (0x0000, 0x0010, 0x041F, 0xAFFF, 0xFFFF, 0xFFFF, 0xF810, 0x9FFF)
+NORMAL = (0x0000, 0x021F, 0x04DF, 0x2FFF, 0xAFFF, 0x5FFF, 0xF810, 0xFFE0, 0xFD20, 0xCFFF)
+QUENTE = (0x0000, 0x9800, 0xF800, 0xFD20, 0xFFE0, 0x5FFF, 0xF810, 0xFFE0, 0xFD20, 0xCFFF)
+FRIO   = (0x0000, 0x0010, 0x041F, 0xAFFF, 0xFFFF, 0xFFFF, 0xF810, 0x9FFF, 0xFD20, 0xCFFF)
+FROST_T = 9.5
+FROST = None
 
 ZERO2 = b'\x00\x00'
 ZERO_LINHA = bytes(COLS * CEL * 2)
 
-OLHO_ESQ = [(3.7, 8.6), (6.7, 10.9), (10.4, 13.0), (15.0, 15.3),
-            (20.6, 17.7), (26.1, 19.8), (31.7, 22.0), (24.3, 22.9),
-            (18.7, 22.1), (13.2, 20.9), (9.5, 18.8), (7.6, 16.1),
-            (6.3, 12.9), (4.9, 10.2)]
-CICATRIZ = [(66.6, 1.0), (67.3, 9), (68.6, 14.5), (69.2, 17), (68.2, 21),
-            (67.6, 29), (66.9, 21.5), (65.9, 17), (66.0, 12), (66.3, 7)]
 EIXO_Y = 15.5
+EYE_CX = 17.5
+EYE_RX = 9.5
+EYE_RY = 11.0
+BOCA_CX = 40.0
+BOCA_W = 10.0
 
 
 class Quadro:
-    """Grade de indices de cor (80x45)."""
     def __init__(self):
         self.idx = [bytearray(COLS) for _ in range(LINS)]
 
@@ -185,7 +180,6 @@ class Quadro:
 
 
 class Renderizador:
-    """Manda para a tela so as linhas da grade que mudaram."""
     def __init__(self, tela):
         self.tela = tela
         self.prev = [None] * LINS
@@ -194,7 +188,7 @@ class Renderizador:
 
     def tema(self, cores):
         self.lut = [struct.pack('>H', c) * (CEL - 1) + ZERO2 for c in cores]
-        self.prev = [None] * LINS      # forca redesenhar tudo
+        self.prev = [None] * LINS
 
     def mostrar(self, q):
         lut = self.lut
@@ -213,29 +207,59 @@ class Renderizador:
             self.tela.bloco(0, ini * CEL, COLS * CEL - 1, gy * CEL - 1, b''.join(partes))
 
 
-# ======================= DESENHO DO ROSTO =======================
-def pontos_olho(espelho, dx, dy, ab, inc):
+def pontos_olho(espelho, dx, dy, ab, inc, ca=0.0):
     ab = max(ab, 0.2)
+    cx = (COLS - EYE_CX if espelho else EYE_CX) + dx
+    cy = EIXO_Y + dy
+    ry = EYE_RY * ab
+    sinal = -1.0 if espelho else 1.0
     out = []
-    for x, y in OLHO_ESQ:
-        yy = EIXO_Y + (y - EIXO_Y) * ab + dy + inc * ((x - 3.7) / 28.0)
-        xx = (COLS - x if espelho else x) + dx
-        out.append((xx, yy))
+    for k in range(20):
+        a = 6.2832 * k / 20
+        px = EYE_RX * math.cos(a)
+        py = ry * math.sin(a)
+        if py < 0:
+            if inc > 0:
+                lid = -ry + inc * 1.6 * (sinal * px / EYE_RX + 1.0) / 2.0
+                if lid > py:
+                    py = lid
+            if ca > 0:
+                lid = -ry + ca * 2.0 * ry
+                if lid > py:
+                    py = lid
+        elif inc < 0:
+            lid = ry + inc * 1.5
+            if lid < py:
+                py = lid
+        out.append((cx + px, cy + py))
     return out
 
 
+def pupila(q, espelho, dx, dy, ab, ox, oy):
+    if ab < 0.55:
+        return
+    h = min(ab, 1.0)
+    cx = (COLS - EYE_CX if espelho else EYE_CX) + dx + ox * 1.4
+    cy = EIXO_Y + dy + oy * 1.4
+    q.elipse(cx, cy, 4.4, 4.4 * h, 0)
+    q.pixel(cx - 2, cy - 2 * h, 4)
+    q.pixel(cx - 1, cy - 2 * h, 4)
+    q.pixel(cx - 2, cy - 1 * h, 4)
+    q.pixel(cx - 1, cy - 1 * h, 4)
+
+
 def geom_boca(cx, s, ab, dy):
-    u = (cx - 40) / 36.3
+    u = (cx - BOCA_CX) / BOCA_W
     u2 = u * u
-    topo = 33.0 - 7.4 * s * u2 + dy
-    esp = (10.6 - 8.6 * u2) * ab
+    topo = 33.0 - 3.6 * s * u2 + dy
+    esp = (2.4 * min(ab, 1.0) + 30.0 * max(ab - 1.0, 0.0)) * (1.0 - 0.5 * u2)
     return topo, topo + esp
 
 
 def boca(q, s=1.0, ab=1.0, dentes=True, fase=0, dx=0, dy=0, onda=0.0, fase_onda=0.0):
     for gx in range(COLS):
         cx = gx + 0.5 - dx
-        u = (cx - 40) / 36.3
+        u = (cx - BOCA_CX) / BOCA_W
         if u > 1 or u < -1:
             continue
         topo, base = geom_boca(cx, s, ab, dy)
@@ -255,7 +279,7 @@ def boca(q, s=1.0, ab=1.0, dentes=True, fase=0, dx=0, dy=0, onda=0.0, fase_onda=
             pt = r - ya
             pb = yb - r
             if n <= 5 or pt < 2 or pb < 2:
-                c = 2 if (pt == 0 or pb == 0) else 3
+                c = 2 if (n > 3 and (pt == 0 or pb == 0)) else 3
                 if ponta and c > 1:
                     c -= 1
                 q.idx[r][gx] = c
@@ -275,7 +299,7 @@ def boca(q, s=1.0, ab=1.0, dentes=True, fase=0, dx=0, dy=0, onda=0.0, fase_onda=
 
 def lingua(q, cx, s=1.0, ab=1.0, dy=0, comp=6):
     topo, base = geom_boca(cx, s, ab, dy)
-    q.elipse(cx, base, 4.5, comp, 6)
+    q.elipse(cx, base, 3.5, comp, 6)
 
 
 def boca_o(q, rx, ry, dx=0, dy=0):
@@ -286,12 +310,16 @@ def boca_o(q, rx, ry, dx=0, dy=0):
 
 def rosto(q, dx=0, dy=0, ab_e=1.0, ab_d=1.0, inc=0.0, ox=0, oy=0,
           s=1.0, ab_b=1.0, dentes=True, fase=0, dy_b=0, onda=0.0, fase_onda=0.0,
-          com_olhos=True, com_boca=True):
+          com_olhos=True, com_boca=True, ca=0.0):
     q.limpar()
     if com_olhos:
-        q.poligono(pontos_olho(False, dx + ox, dy + oy, ab_e, inc))
-        q.poligono(pontos_olho(True, dx + ox, dy + oy, ab_d, inc))
-    q.poligono([(x + dx, y + dy) for x, y in CICATRIZ], 4, 4, 4)
+        ex = dx if PUPILAS else dx + ox
+        ey = dy if PUPILAS else dy + oy
+        q.poligono(pontos_olho(False, ex, ey, ab_e, inc, ca))
+        q.poligono(pontos_olho(True, ex, ey, ab_d, inc, ca))
+        if PUPILAS:
+            pupila(q, False, dx, dy, ab_e, ox, oy)
+            pupila(q, True, dx, dy, ab_d, ox, oy)
     if com_boca:
         boca(q, s, ab_b, dentes, fase, dx, dy + dy_b, onda, fase_onda)
 
@@ -304,10 +332,10 @@ def estrela(q, x, y):
 
 def gota(q, x, y):
     q.pixel(x, y, 5)
-    q.pixel(x - 1, y + 1, 5)
-    q.pixel(x, y + 1, 5)
-    q.pixel(x + 1, y + 1, 5)
-    q.pixel(x, y + 2, 5)
+    for ax in (-1, 0, 1):
+        q.pixel(x + ax, y + 1, 5)
+        q.pixel(x + ax, y + 2, 5)
+    q.pixel(x, y + 3, 5)
 
 
 def floco(q, x, y):
@@ -326,13 +354,47 @@ def letra_z(q, x, y):
                 q.pixel(x + i, y + j, 4)
 
 
-# ======================= ANIMACOES (geradores: 1 yield = 1 quadro) =======================
+def sol(q, cx, cy, r, t):
+    if r < 1.0:
+        return
+    q.elipse(cx, cy, r, r, 8)
+    q.elipse(cx, cy, max(r - 1.5, 0.6), max(r - 1.5, 0.6), 7)
+    esc = r / 4.0
+    for k in range(8):
+        ang = k * 0.7854 + t * 0.12
+        comp = (3.0 + 2.0 * math.sin(t * 0.5 + k)) * esc
+        d = r + 1.5
+        while d < r + 1.5 + comp:
+            q.pixel(cx + d * math.cos(ang), cy + d * math.sin(ang), 7)
+            d += 1.0
+
+
+def montar_frost():
+    global FROST
+    lista = []
+    for y in range(LINS):
+        ey = min(y, LINS - 1 - y)
+        for x in range(COLS):
+            ex = min(x, COLS - 1 - x)
+            m = min(ex, ey) + 0.25 * max(ex, ey) + random.random() * 3.0
+            if m < FROST_T:
+                lista.append((m, x, y))
+    lista.sort()
+    FROST = lista
+
+
+def seq(*gens):
+    for g in gens:
+        yield from g
+
+
 class Estado:
     def __init__(self, tela):
         self.tela = tela
         self.q = Quadro()
         self.render = Renderizador(tela)
         self.tonto_ate = 0
+        self.parado = False
 
 
 def anim_piscar(S):
@@ -378,7 +440,7 @@ def anim_lingua(S):
     for i in range(44):
         cx = 40 + 8 * math.sin(i * 0.4)
         rosto(q, ab_e=0.8, ab_d=0.8, inc=2, s=1.1, ab_b=0.9, dy_b=-4)
-        lingua(q, cx, 1.1, 0.9, -4, 6)
+        lingua(q, cx, 1.1, 0.9, -4, 4)
         yield
 
 
@@ -410,14 +472,27 @@ def anim_brilho(S):
         yield
 
 
-def anim_sono(S):
+def anim_acordar(S):
     q = S.q
-    for i in range(56):
+    print("acordou")
+    for a in (0.3, 0.6, 1.0, 1.25, 1.0):
+        rosto(q, ab_e=a, ab_d=a)
+        yield
+
+
+def anim_dormir(S):
+    q = S.q
+    S.render.tema(NORMAL)
+    print("dormindo")
+    i = 0
+    while S.parado:
         rosto(q, dy=2, ab_e=0.2, ab_d=0.2, s=0.2, ab_b=0.35 + 0.1 * math.sin(i * 0.25),
               dentes=False)
         for k in range(3):
             letra_z(q, 54 + k * 5, 28 - ((i * 0.5 + k * 12) % 28))
+        i += 1
         yield
+    yield from anim_acordar(S)
 
 
 def anim_tonto(S):
@@ -432,7 +507,7 @@ def anim_tonto(S):
             cx = 17.5 + e * 45
             sentido = 1 if e == 0 else -1
             a = 0.0
-            while True:                      # espiral de Arquimedes girando
+            while True:
                 r = 0.5 * a
                 if r > 7.0:
                     break
@@ -449,38 +524,93 @@ def anim_tonto(S):
 
 def anim_quente(S):
     q = S.q
-    S.render.tema(QUENTE)
-    for i in range(100):
-        ab_olho = 0.55 + 0.05 * math.sin(i * 0.3)
-        pant = 1.0 + 0.25 * math.sin(i * 0.9)
-        rosto(q, ab_e=ab_olho, ab_d=ab_olho, inc=-1, s=0.9, ab_b=pant, dy_b=-3)
-        lingua(q, 46, 0.9, pant, -3, 4 + 3 * (pant - 0.75))
-        for k, x in enumerate((13, 67, 40)):
-            gota(q, x, (i * 0.7 + k * 13) % 36)
+    S.render.tema(QUENTE if TINGIR_CLIMA else NORMAL)
+    gotas = [[6, 12.0, 8], [40, 2.0, 6], [74, 14.0, 9]]
+    for i in range(160):
+        if i < 30:
+            p = i / 30.0
+        elif i < 130:
+            p = 1.0
+        else:
+            p = 1.0 - (i - 130) / 30.0
+        dx = 1.2 * p * math.sin(i * 0.11)
+        dy = 3.0 * p + 0.6 * p * math.sin(i * 0.15)
+        pant = 1.0 + p * (0.12 + 0.08 * math.sin(i * 0.9))
+        ab = 1.0 - 0.1 * p
+        s = 1.0 - 0.8 * p
+        rosto(q, dx=dx, dy=dy, ab_e=ab, ab_d=ab, ca=0.45 * p, oy=1.5 * p,
+              s=s, ab_b=pant, dentes=False, dy_b=-3.0 * p)
+        if pant > 1.06:
+            lingua(q, 40 + dx, s, pant, dy - 3.0 * p, 2.5 + 6.0 * (pant - 1.0))
+        sol(q, 74, 5, 4.0 * p, i)
+        if p > 0.2:
+            for g in gotas:
+                g[1] += g[2] * DT
+                if g[1] > LINS - 3:
+                    g[1] = 4.0 + random.random() * 6
+                gota(q, g[0], g[1])
         yield
 
 
 def anim_frio(S):
     q = S.q
-    S.render.tema(FRIO)
-    flocos = [[random.randint(2, COLS - 3), random.randint(0, LINS), 6 + random.randint(0, 5)]
-              for _ in range(9)]
-    for i in range(100):
-        dx = random.choice((-1, 0, 1))
-        rosto(q, dx=dx, ab_e=0.85, ab_d=0.85, inc=1, s=-1.3,
-              ab_b=0.75 + 0.35 * ((i // 2) % 2), dy_b=2)
+    S.render.tema(FRIO if TINGIR_CLIMA else NORMAL)
+    if FROST is None:
+        montar_frost()
+    n = len(FROST)
+    k = 0
+    flocos = [[random.randint(1, COLS - 2), random.randint(-LINS, 0), 6 + random.randint(0, 6),
+               random.randint(0, 2), random.random() * 6.28] for _ in range(14)]
+    for i in range(140):
+        if i < 30:
+            cresc = 0.6 * i / 30.0
+            trem = i / 30.0
+        elif i < 110:
+            cresc = 0.6 + 0.4 * (i - 30) / 80.0
+            trem = 1.0
+        else:
+            cresc = 1.0 - (i - 110) / 30.0
+            trem = cresc
+        lim = FROST_T * cresc
+        while k < n and FROST[k][0] < lim:
+            k += 1
+        while k > 0 and FROST[k - 1][0] >= lim:
+            k -= 1
+        dx = random.choice((-1, 0, 1)) if trem > 0.3 else 0
+        dy = random.choice((0, 0, 1)) if trem > 0.6 else 0
+        ab_b = 1.0 if trem < 0.5 else (1.18 if i % 2 else 0.95)
+        ab = 1.0 - 0.2 * trem
+        rosto(q, dx=dx, dy=dy, ab_e=ab, ab_d=ab, inc=trem,
+              s=1.0 - 2.3 * trem, ab_b=ab_b, dy_b=trem)
+        for j in range(k):
+            m, x, y = FROST[j]
+            q.idx[y][x] = 4 if m > lim - 1.5 else 9
         for f in flocos:
             f[1] += f[2] * DT
-            if f[1] > LINS + 1:
-                f[1] = -1
-                f[0] = random.randint(2, COLS - 3)
-            floco(q, f[0] + math.sin(i * 0.1 + f[2]), f[1])
+            if f[1] > LINS + 1 and i < 110:
+                f[1] = -2
+                f[0] = random.randint(1, COLS - 2)
+            fx = f[0] + 2.0 * math.sin(i * 0.12 + f[4])
+            if f[3] == 0:
+                floco(q, fx, f[1])
+            else:
+                q.pixel(fx, f[1], 4)
+        yield
+
+
+def anim_alivio(S):
+    q = S.q
+    S.render.tema(NORMAL)
+    for i in range(40):
+        rosto(q, dy=1 if (i // 5) % 2 else 0, ab_e=0.45, ab_d=0.45, inc=-1.2, s=1.5)
+        if (i // 4) % 2 == 0:
+            estrela(q, 9, 36)
+            estrela(q, 71, 32)
         yield
 
 
 IDLE = ((anim_piscar, 5), (anim_olhar, 3), (anim_piscadela, 2), (anim_risada, 2),
-        (anim_lingua, 2), (anim_surpreso, 2), (anim_bravo, 1), (anim_brilho, 2),
-        (anim_sono, 1))
+        (anim_lingua, 2), (anim_surpreso, 2), (anim_bravo, 1), (anim_brilho, 2))
 
 
 def escolher(ultima):
@@ -498,70 +628,115 @@ def escolher(ultima):
     return anim_piscar
 
 
-# ======================= SENSORES =======================
 class Sensor:
-    """MPU6050 (movimento + temperatura) por I2C. Sem ele: temperatura do chip."""
     def __init__(self):
         self.i2c = None
-        self.addr = None
+        self.imu = None
+        self.bmp = None
+        self.cal = None
         self.temp = None
+        self.prox_temp = time.ticks_ms()
+        self.ult_mov = time.ticks_ms()
         self.impactos = []
         self.acima = False
+        self.max_g = 0.0
+        self.max_giro = 0.0
         self.botao = Pin(0, Pin.IN, Pin.PULL_UP) if BOTAO_SIMULA_SACUDIDA else None
         try:
-            self.i2c = I2C(0, scl=Pin(I2C_SCL), sda=Pin(I2C_SDA), freq=400000)
+            self.i2c = SoftI2C(scl=Pin(I2C_SCL), sda=Pin(I2C_SDA), freq=400000)
             achados = self.i2c.scan()
             print("I2C encontrou:", [hex(a) for a in achados])
-            for a in (0x68, 0x69):
-                if a in achados:
-                    self.addr = a
-            if self.addr is not None:
-                self.i2c.writeto_mem(self.addr, 0x6B, b'\x00')   # acorda o MPU6050
+            for a in (0x6B, 0x6A):
+                if a in achados and self.i2c.readfrom_mem(a, 0x00, 1)[0] == 0x05:
+                    self.imu = a
+                    break
+            for a in (0x77, 0x76):
+                if a in achados and self.i2c.readfrom_mem(a, 0xD0, 1)[0] in (0x56, 0x57, 0x58, 0x60):
+                    self.bmp = a
+                    break
+            if self.imu is not None:
+                self.i2c.writeto_mem(self.imu, 0x02, b'\x40')
+                self.i2c.writeto_mem(self.imu, 0x03, b'\x25')
+                self.i2c.writeto_mem(self.imu, 0x04, b'\x55')
+                self.i2c.writeto_mem(self.imu, 0x08, b'\x03')
+            if self.bmp is not None:
+                self.cal = struct.unpack('<Hhh', self.i2c.readfrom_mem(self.bmp, 0x88, 6))
+                self.i2c.writeto_mem(self.bmp, 0xF5, b'\x00')
+                self.i2c.writeto_mem(self.bmp, 0xF4, b'\x27')
+            time.sleep_ms(50)
         except Exception as e:
             print("I2C indisponivel:", e)
-        if self.addr is not None:
-            print("MPU6050 ok (movimento + temperatura)")
+            self.imu = None
+            self.bmp = None
+        if self.imu is not None:
+            print("QMI8658C ok (giroscopio + acelerometro)")
         else:
             print("Sem sensor de movimento. Use o botao BOOT para simular a sacudida.")
+        if self.bmp is not None:
+            print("BMP280 ok (temperatura)")
+        else:
+            print("Sem BMP280: usando a temperatura do chip.")
+
+    def parado(self, agora):
+        return self.imu is not None and time.ticks_diff(agora, self.ult_mov) >= PARADO_MS
 
     def ler(self):
-        """Retorna (temperatura_C ou None, sacudiu)."""
         agora = time.ticks_ms()
         temp = None
         sac = False
-        if self.addr is not None:
+        if self.imu is not None:
             try:
-                d = self.i2c.readfrom_mem(self.addr, 0x3B, 8)
-                ax, ay, az, t = struct.unpack('>hhhh', d)
-                g = math.sqrt(ax * ax + ay * ay + az * az) / 16384.0
-                temp = t / 340.0 + 36.53
-                acima = abs(g - 1.0) > LIMIAR_G
+                d = self.i2c.readfrom_mem(self.imu, 0x35, 12)
+                ax, ay, az, gx, gy, gz = struct.unpack('<hhhhhh', d)
+                g = math.sqrt(ax * ax + ay * ay + az * az) / 4096.0
+                giro = math.sqrt(gx * gx + gy * gy + gz * gz) / 64.0
+                desvio = abs(g - 1.0)
+                if desvio > self.max_g:
+                    self.max_g = desvio
+                if giro > self.max_giro:
+                    self.max_giro = giro
+                if desvio > MOV_G or giro > MOV_GIRO:
+                    self.ult_mov = agora
+                acima = desvio > LIMIAR_G
                 if acima and not self.acima:
                     self.impactos.append(agora)
                 self.acima = acima
                 self.impactos = [x for x in self.impactos
                                  if time.ticks_diff(agora, x) < JANELA_MS]
-                if len(self.impactos) >= IMPACTOS:
+                if len(self.impactos) >= IMPACTOS or giro > LIMIAR_GIRO:
                     sac = True
                     self.impactos = []
             except Exception:
-                pass
-        if temp is None and esp32 is not None:
+                self.ult_mov = agora
+        if self.bmp is not None:
+            if time.ticks_diff(agora, self.prox_temp) >= 0:
+                self.prox_temp = time.ticks_add(agora, 1000)
+                try:
+                    d = self.i2c.readfrom_mem(self.bmp, 0xFA, 3)
+                    adc = (d[0] << 12) | (d[1] << 4) | (d[2] >> 4)
+                    if adc != 0x80000:
+                        t1, t2, t3 = self.cal
+                        v1 = (adc / 16384.0 - t1 / 1024.0) * t2
+                        v2 = (adc / 131072.0 - t1 / 8192.0) ** 2 * t3
+                        temp = (v1 + v2) / 5120.0
+                except Exception:
+                    pass
+        elif esp32 is not None:
             try:
                 temp = esp32.mcu_temperature()
             except Exception:
                 pass
         if self.botao is not None and self.botao.value() == 0:
             sac = True
+            self.ult_mov = agora
         if temp is not None:
             temp += TEMP_OFFSET
-            self.temp = temp if self.temp is None else self.temp * 0.95 + temp * 0.05
+            self.temp = temp if self.temp is None else self.temp * 0.7 + temp * 0.3
         if TEMP_FORCADA is not None:
             self.temp = TEMP_FORCADA
         return self.temp, sac
 
 
-# ======================= PRINCIPAL =======================
 def main():
     tela = Tela(1)
     S = Estado(tela)
@@ -572,31 +747,71 @@ def main():
     S.render.mostrar(q)
 
     agora = time.ticks_ms()
-    ultimo_clima = time.ticks_add(agora, 3000 - PERIODO_CLIMA_S * 1000)   # 1a vez em ~3 s
+    ultimo_clima = agora
     proximo = time.ticks_add(agora, random.randint(1500, 4000))
     ultima_idle = None
     anim = None
     nome = ""
+    clima = None
+    clima_cand = None
+    clima_desde = agora
+    alivio = False
     ult_print = agora
     periodo = 1000 // FPS
 
     while True:
         t0 = time.ticks_ms()
         temp, sac = sensor.ler()
+        S.parado = sensor.parado(t0)
+
+        alvo = clima
+        if temp is not None:
+            if clima == "quente":
+                if temp < TEMP_QUENTE - HISTERESE:
+                    alvo = None
+            elif clima == "frio":
+                if temp > TEMP_FRIO + HISTERESE:
+                    alvo = None
+            elif temp >= TEMP_QUENTE:
+                alvo = "quente"
+            elif temp <= TEMP_FRIO:
+                alvo = "frio"
+        if alvo != clima_cand:
+            clima_cand = alvo
+            clima_desde = t0
+        if clima_cand != clima and time.ticks_diff(t0, clima_desde) >= CLIMA_ESTAVEL_S * 1000:
+            anterior = clima
+            clima = clima_cand
+            if clima is None:
+                alivio = anterior is not None
+            else:
+                alivio = False
+                ultimo_clima = time.ticks_add(t0, -PERIODO_CLIMA_S * 1000)
+            print("clima:", clima)
 
         if sac:
             S.tonto_ate = time.ticks_add(t0, TONTO_MS)
             if nome != "tonto":
+                if nome == "clima":
+                    ultimo_clima = t0
                 anim = anim_tonto(S)
                 nome = "tonto"
 
-        if anim is None:
-            quente = temp is not None and temp >= TEMP_QUENTE
-            frio = temp is not None and temp <= TEMP_FRIO
-            clima_vence = time.ticks_diff(t0, ultimo_clima) >= PERIODO_CLIMA_S * 1000
-            if clima_vence and (quente or frio):
-                anim = anim_quente(S) if quente else anim_frio(S)
-                nome = "clima"
+        clima_vence = clima is not None and time.ticks_diff(t0, ultimo_clima) >= PERIODO_CLIMA_S * 1000
+
+        if nome != "tonto" and clima_vence and (anim is None or nome == "sono"):
+            gen = anim_quente(S) if clima == "quente" else anim_frio(S)
+            anim = seq(anim_acordar(S), gen) if nome == "sono" else gen
+            nome = "clima"
+        elif anim is None:
+            if alivio and not S.parado:
+                alivio = False
+                anim = anim_alivio(S)
+                nome = "alivio"
+            elif S.parado:
+                alivio = False
+                anim = anim_dormir(S)
+                nome = "sono"
             elif time.ticks_diff(t0, proximo) >= 0:
                 f = escolher(ultima_idle)
                 ultima_idle = f
@@ -619,7 +834,10 @@ def main():
         if time.ticks_diff(t0, ult_print) > 5000:
             ult_print = t0
             if temp is not None:
-                print("temp: %.1f C" % temp)
+                print("temp: %.1f C | movimento max: %.2f g, %.0f graus/s" %
+                      (temp, sensor.max_g, sensor.max_giro))
+            sensor.max_g = 0.0
+            sensor.max_giro = 0.0
 
         gasto = time.ticks_diff(time.ticks_ms(), t0)
         if gasto < periodo:
@@ -628,3 +846,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
