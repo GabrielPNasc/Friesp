@@ -1,8 +1,8 @@
 import time, gc, framebuf, struct
 from machine import Pin, SoftSPI
 
-TITULO    = "Gabriel Nascimento"
-SUBTITULO = "Developer - Cybersecurity"
+TITULO    = "Titulo"
+SUBTITULO = "Subtitulo"
 ESC_T   = 3      # tamanho do titulo (maior)
 ESC_S   = 2      # tamanho do subtitulo (menor)
 PASSO   = 2      # pixels por quadro (menor = mais lento e legivel)
